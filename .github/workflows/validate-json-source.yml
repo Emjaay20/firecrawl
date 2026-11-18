@@ -1,0 +1,103 @@
+name: Validate JSON source-status candidate
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Candidate commit to validate
+        required: true
+        default: 7b7b70cc7cb12253aa84494e2fe4d232385be71f
+permissions:
+  contents: read
+jobs:
+  focused-harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+    env:
+      TEST_SUITE_SELF_HOSTED: 'true'
+      TEST_SUITE_WEBSITE: http://127.0.0.1:4321
+      TEST_API_URL: http://127.0.0.1:3002
+      TEST_API_KEY: test
+      TEST_TEAM_ID: bypass
+      USE_DB_AUTHENTICATION: 'false'
+      HOST: 127.0.0.1
+      PORT: '3002'
+      REDIS_URL: redis://127.0.0.1:6379
+      REDIS_RATE_LIMIT_URL: redis://127.0.0.1:6379
+      NUQ_WORKER_COUNT: '1'
+      NUM_WORKERS_PER_QUEUE: '1'
+      HARNESS_STARTUP_TIMEOUT_MS: '120000'
+      OPENAI_API_KEY: local-fixture-key-not-a-credential
+      OPENAI_BASE_URL: http://127.0.0.1:9010/v1
+      USE_GO_MARKDOWN_PARSER: 'true'
+      ENV: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install FoundationDB client and build prerequisites
+        run: |
+          curl -fsSL -o /tmp/fdb-clients.deb https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb
+          sudo dpkg -i /tmp/fdb-clients.deb
+          corepack enable
+          corepack prepare pnpm@11.4.0 --activate
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/api/native/target
+          key: native-json-status-${{ runner.os }}-${{ hashFiles('apps/api/native/Cargo.lock') }}
+      - name: Start deterministic local model fixture
+        run: |
+          cat > /tmp/json-model-fixture.cjs <<'JS'
+          const http=require('node:http');
+          function value(schema){
+            if(schema?.type==='boolean')return false;
+            if(schema?.type==='number'||schema?.type==='integer')return 0;
+            if(schema?.type==='array')return [];
+            if(schema?.properties)return Object.fromEntries(Object.entries(schema.properties).map(([key,s])=>[key,value(s)]));
+            return 'Firecrawl Test Site';
+          }
+          http.createServer(async(req,res)=>{
+            let text='';for await(const chunk of req)text+=chunk;
+            const body=JSON.parse(text||'{}');
+            const schema=body.response_format?.json_schema?.schema;
+            const data=schema?value(schema):{heading:'Firecrawl Test Site'};
+            res.setHeader('Content-Type','application/json');
+            res.end(JSON.stringify({id:'fixture',object:'chat.completion',created:1,model:body.model||'gpt-4o-mini',choices:[{index:0,message:{role:'assistant',content:JSON.stringify(data)},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+          }).listen(9010,'127.0.0.1');
+          JS
+          node /tmp/json-model-fixture.cjs > /tmp/json-model-fixture.log 2>&1 &
+      - name: Install and start owned fixture website
+        working-directory: apps/test-site
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec astro preview --host 127.0.0.1 --port 4321 > /tmp/test-site.log 2>&1 &
+      - name: Run targeted transformer and API snippets through the harness
+        working-directory: apps/api
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile
+          pnpm harness pnpm exec vitest run src/scraper/scrapeURL/transformers/llmExtract.test.ts src/__tests__/snips/v2/json-source-status.test.ts --reporter=default --reporter=junit 2>&1 | tee /tmp/json-source-harness.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: json-source-validation
+          path: |
+            apps/api/test-results/junit.xml
+            /tmp/json-source-harness.log
+            /tmp/json-model-fixture.log
+            /tmp/test-site.log
+          retention-days: 7
