@@ -17,6 +17,8 @@ jobs:
         image: redis:7
         ports: ['6379:6379']
     env:
+      # Permit the owned loopback fixture only in this disposable test runner.
+      ALLOW_LOCAL_WEBHOOKS: 'true'
       TEST_SUITE_SELF_HOSTED: 'true'
       TEST_SUITE_WEBSITE: http://127.0.0.1:4321
       TEST_API_URL: http://127.0.0.1:3002
