@@ -74,10 +74,11 @@ jobs:
           http.createServer(async(req,res)=>{
             let text='';for await(const chunk of req)text+=chunk;
             const body=JSON.parse(text||'{}');
-            const schema=body.response_format?.json_schema?.schema;
+            const schema=body.text?.format?.schema || body.response_format?.json_schema?.schema;
             const data=schema?value(schema):{heading:'Firecrawl Test Site'};
             res.setHeader('Content-Type','application/json');
-            res.end(JSON.stringify({id:'fixture',object:'chat.completion',created:1,model:body.model||'gpt-4o-mini',choices:[{index:0,message:{role:'assistant',content:JSON.stringify(data)},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+            if(req.url?.endsWith('/responses')){res.end(JSON.stringify({id:'fixture',object:'response',created_at:1,status:'completed',model:body.model||'gpt-4o-mini',output:[{id:'msg_fixture',type:'message',status:'completed',role:'assistant',content:[{type:'output_text',text:JSON.stringify(data),annotations:[]}]}],usage:{input_tokens:1,output_tokens:1,total_tokens:2}}));return;}
+          res.end(JSON.stringify({id:'fixture',object:'chat.completion',created:1,model:body.model||'gpt-4o-mini',choices:[{index:0,message:{role:'assistant',content:JSON.stringify(data)},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
           }).listen(9010,'127.0.0.1');
           JS
           node /tmp/json-model-fixture.cjs > /tmp/json-model-fixture.log 2>&1 &
